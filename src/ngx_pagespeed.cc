@@ -1594,7 +1594,10 @@ void ps_release_request_context(void* data) {
     ctx->driver->Cleanup();
     ctx->driver = NULL;
   }
-
+  if(ctx->ipro_response_headers != NULL) {
+    delete ctx->ipro_response_headers;
+    ctx->ipro_response_headers = NULL;
+  }
   ps_release_base_fetch(ctx);
 
   delete ctx;
@@ -1734,6 +1737,9 @@ ngx_int_t ps_resource_handler(ngx_http_request_t *r, bool html_rewrite) {
     ctx->in_place = false;
     ctx->modify_headers = true;
     ctx->pagespeed_connection = NULL;
+    ctx->driver = NULL;
+    ctx->recorder = NULL;
+    ctx->ipro_response_headers = NULL;
 
     // Set up a cleanup handler on the request.
     ngx_http_cleanup_t* cleanup = ngx_http_cleanup_add(r, 0);
@@ -1836,6 +1842,7 @@ ngx_int_t ps_resource_handler(ngx_http_request_t *r, bool html_rewrite) {
              url_string.c_str());
 
     ctx->in_place = true;
+
     ctx->base_fetch->set_handle_error(false);
     ctx->driver->FetchInPlaceResource(
                  url, false /* proxy_mode */, ctx->base_fetch);
@@ -2055,7 +2062,11 @@ ngx_int_t ps_html_rewrite_header_filter(ngx_http_request_t* r) {
   cfg_s->server_context->FlushCacheIfNecessary();
 
   ps_request_ctx_t* ctx = ps_get_request_context(r);
-
+  if (ctx != NULL)  {
+    ctx->ipro_response_headers = new net_instaweb::ResponseHeaders();
+    copy_response_headers_from_ngx(r, ctx->ipro_response_headers);
+  }
+  
   if (ctx == NULL || ctx->html_rewrite == false) {
     return ngx_http_next_header_filter(r);
   }
@@ -2064,7 +2075,7 @@ ngx_int_t ps_html_rewrite_header_filter(ngx_http_request_t* r) {
     ctx->html_rewrite = false;
     return ngx_http_next_header_filter(r);
   }
-
+ 
   ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                  "http pagespeed html rewrite header filter \"%V\"", &r->uri);
 
@@ -2128,7 +2139,6 @@ ngx_int_t ps_html_rewrite_header_filter(ngx_http_request_t* r) {
   }
 
   ps_strip_html_headers(r);
-
 
   // TODO(jefftk): is this thread safe?
   ctx->base_fetch->PopulateResponseHeaders();
@@ -2242,6 +2252,7 @@ ngx_int_t ps_in_place_check_header_filter(ngx_http_request_t *r) {
            server_context->http_cache(),
            server_context->statistics(),
            message_handler);
+
     // set in memory flag for in place_body_filter
     r->filter_need_in_memory = 1;
   } else {
@@ -2265,6 +2276,29 @@ ngx_int_t ps_in_place_body_filter(ngx_http_request_t *r, ngx_chain_t *in) {
     return ngx_http_next_body_filter(r, in);
   }
 
+  CHECK(ctx->ipro_response_headers != NULL);
+
+  if (r->headers_out.location != NULL) {
+    ctx->ipro_response_headers->Add(
+        net_instaweb::HttpAttributes::kLocation,
+        ngx_psol::str_to_string_piece(r->headers_out.location->value));
+  }
+
+  StringPiece content_type = ctx->ipro_response_headers->Lookup1(
+      net_instaweb::HttpAttributes::kContentType);
+  if (content_type.empty()) {
+    ctx->ipro_response_headers->Add(net_instaweb::HttpAttributes::kContentType,
+                                    ngx_psol::str_to_string_piece(r->headers_out.content_type));
+  }
+  
+  StringPiece date = ctx->ipro_response_headers->Lookup1(
+      net_instaweb::HttpAttributes::kDate);
+  if (date.empty()) {
+    ctx->ipro_response_headers->SetDate(ngx_current_msec);
+    ctx->ipro_response_headers->ComputeCaching();
+  }
+
+ 
   ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                  "ps in place body filter: %V", &r->uri);
 
@@ -2284,28 +2318,9 @@ ngx_int_t ps_in_place_body_filter(ngx_http_request_t *r, ngx_chain_t *in) {
     }
 
     if (cl->buf->last_buf) {
-      net_instaweb::ResponseHeaders headers;
-      // TODO(oschaaf): We don't get a Date response header here.
-      // Currently, we invent one and set it to the current date/time.
-      // We need to investigate why we don't receive it.
-      headers.set_major_version(r->http_version / 1000);
-      headers.set_minor_version(r->http_version % 1000);
-      copy_headers_from_table(r->headers_out.headers, &headers);
-      headers.set_status_code(r->headers_out.status);
-      headers.Add(net_instaweb::HttpAttributes::kContentType,
-                  ngx_psol::str_to_string_piece(r->headers_out.content_type));
-      if (r->headers_out.location != NULL) {
-        headers.Add(net_instaweb::HttpAttributes::kLocation,
-                    ngx_psol::str_to_string_piece(r->headers_out.location->value));
-      }
-
-      StringPiece date = headers.Lookup1(net_instaweb::HttpAttributes::kDate);
-      if (date.empty()) {
-        headers.SetDate(ngx_current_msec);
-      }
-
-      headers.ComputeCaching();
-      ctx->recorder->DoneAndSetHeaders(&headers);
+      ctx->recorder->DoneAndSetHeaders(ctx->ipro_response_headers);
+      delete ctx->ipro_response_headers;
+      ctx->ipro_response_headers = NULL;
       ctx->recorder = NULL;
       break;
     }
@@ -2845,7 +2860,6 @@ ngx_int_t ps_html_rewrite_fix_headers_filter(ngx_http_request_t *r) {
       || !ctx->modify_headers || !ctx->html_rewrite) {
     return ngx_http_next_header_filter(r);
   }
-
   // Don't cache html.  See mod_instaweb:instaweb_fix_headers_filter.
   net_instaweb::NgxCachingHeaders caching_headers(r);
   ps_set_cache_control(r, string_piece_to_pool_string(

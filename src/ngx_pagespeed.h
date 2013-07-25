@@ -98,6 +98,7 @@ typedef struct {
   // for in place resource
   net_instaweb::RewriteDriver* driver;
   net_instaweb::InPlaceResourceRecorder *recorder;
+  net_instaweb::ResponseHeaders* ipro_response_headers;
 } ps_request_ctx_t;
 
 
