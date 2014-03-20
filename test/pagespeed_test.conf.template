@@ -140,7 +140,7 @@ http {
       # pagespeed directives inside of a server location block to be respected,
       # then uncomment the following line and duplicate the if-in-location test
       # for if-in-server.
-      #pagespeed EnableFilters inline_javascript;
+      pagespeed EnableFilters inline_javascript;
       set $inline_javascript "Yes";
     }
 
