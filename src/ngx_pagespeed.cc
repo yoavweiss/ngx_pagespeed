@@ -441,19 +441,19 @@ char* ps_srv_configure(ngx_conf_t* cf, ngx_command_t* cmd, void* conf);
 char* ps_loc_configure(ngx_conf_t* cf, ngx_command_t* cmd, void* conf);
 
 ngx_command_t ps_commands[] = {
-  { ngx_string("pagespeed"),
+    { ngx_string("pagespeed"),
     NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_TAKE1|
     NGX_CONF_TAKE2|NGX_CONF_TAKE3|NGX_CONF_TAKE4|NGX_CONF_TAKE5,
     ps_srv_configure,
     NGX_HTTP_SRV_CONF_OFFSET,
     0,
     NULL },
-
   { ngx_string("pagespeed"),
-    NGX_HTTP_LOC_CONF|NGX_HTTP_LIF_CONF|NGX_CONF_TAKE1|
-    NGX_CONF_TAKE2|NGX_CONF_TAKE3|NGX_CONF_TAKE4|NGX_CONF_TAKE5,
+    NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_LIF_CONF|NGX_CONF_TAKE1|
+        NGX_HTTP_SIF_CONF|
+        NGX_CONF_TAKE2|NGX_CONF_TAKE3|NGX_CONF_TAKE4|NGX_CONF_TAKE5,
     ps_loc_configure,
-    NGX_HTTP_SRV_CONF_OFFSET,
+    NGX_HTTP_LOC_CONF_OFFSET,
     0,
     NULL },
 
@@ -652,16 +652,15 @@ char* ps_configure(ngx_conf_t* cf,
 }
 
 char* ps_srv_configure(ngx_conf_t* cf, ngx_command_t* cmd, void* conf) {
-  ps_srv_conf_t* cfg_s = static_cast<ps_srv_conf_t*>(
-      ngx_http_conf_get_module_srv_conf(cf, ngx_pagespeed));
+  ps_srv_conf_t* cfg_s = static_cast<ps_srv_conf_t*>(conf);
+  fprintf(stderr, "ps_srv_configure for [%p]\n", cfg_s);
   return ps_configure(cf, &cfg_s->options, cfg_s->handler,
                       PsConfigure::kServer);
 }
 
 char* ps_loc_configure(ngx_conf_t* cf, ngx_command_t* cmd, void* conf) {
-  ps_loc_conf_t* cfg_l = static_cast<ps_loc_conf_t*>(
-      ngx_http_conf_get_module_loc_conf(cf, ngx_pagespeed));
-
+  ps_loc_conf_t* cfg_l = static_cast<ps_loc_conf_t*>(conf);
+  fprintf(stderr, "ps_loc_configure for [%p]\n", cfg_l);
   return ps_configure(cf, &cfg_l->options, cfg_l->handler,
                       PsConfigure::kLocation);
 }
@@ -786,6 +785,7 @@ void* ps_create_loc_conf(ngx_conf_t* cf) {
 // like.
 void ps_merge_options(NgxRewriteOptions* parent_options,
                       NgxRewriteOptions** child_options) {
+  //fprintf(stderr, "ps_merge_options: [%p]/[%p]\n", parent_options, *child_options);
   if (parent_options == NULL) {
     // Nothing to do.
   } else if (*child_options == NULL) {
@@ -821,6 +821,7 @@ char* ps_merge_srv_conf(ngx_conf_t* cf, void* parent, void* child) {
   ps_srv_conf_t* cfg_s = static_cast<ps_srv_conf_t*>(child);
 
   ps_merge_options(parent_cfg_s->options, &cfg_s->options);
+  fprintf(stderr, "merge_srv_conf: p[%p] / c[%p](rwo:%p)\n", parent_cfg_s, cfg_s, cfg_s->options);
 
   if (cfg_s->options == NULL) {
     return NGX_CONF_OK;  // No pagespeed options; don't do anything.
@@ -833,9 +834,11 @@ char* ps_merge_srv_conf(ngx_conf_t* cf, void* parent, void* child) {
   // TODO(jefftk): either figure out how to get a hostname and port for this
   // server block or change ServerContext not to ask for them.
   int dummy_port = -times_ps_merge_srv_conf_called;
-
+  fprintf(stderr, "dummy port: [%d]\n", dummy_port);
+  
   ps_main_conf_t* cfg_m = static_cast<ps_main_conf_t*>(
       ngx_http_conf_get_module_main_conf(cf, ngx_pagespeed));
+  fprintf(stderr, "set driver main conf from [%p]\n", parent_cfg_s);
   cfg_m->driver_factory->set_main_conf(parent_cfg_s->options);
   cfg_s->server_context = cfg_m->driver_factory->MakeNgxServerContext(
       "dummy_hostname", dummy_port);
@@ -865,6 +868,8 @@ char* ps_merge_srv_conf(ngx_conf_t* cf, void* parent, void* child) {
 
 char* ps_merge_loc_conf(ngx_conf_t* cf, void* parent, void* child) {
   ps_loc_conf_t* cfg_l = static_cast<ps_loc_conf_t*>(child);
+  ps_loc_conf_t* parent_cfg_l = static_cast<ps_loc_conf_t*>(parent);
+  fprintf(stderr, "merge_loc_conf: p[%p/%p] / c[%p/%p]\n", parent_cfg_l, parent_cfg_l->options, cfg_l, cfg_l->options);
   if (cfg_l->options == NULL) {
     // No directory specific options.
     return NGX_CONF_OK;
@@ -875,10 +880,11 @@ char* ps_merge_loc_conf(ngx_conf_t* cf, void* parent, void* child) {
   // a pretend "location" block.  In this case we may have pagespeed options
   // from the parent "location" block as well as from the current locationish
   // "if" block.
-  ps_loc_conf_t* parent_cfg_l = static_cast<ps_loc_conf_t*>(parent);
   if (parent_cfg_l->options != NULL) {
     // Rebase our options off of the ones defined in the parent location block.
     ps_merge_options(parent_cfg_l->options, &cfg_l->options);
+    GoogleString s = cfg_l->options->OptionsToString();
+    fprintf(stderr, "merged loc opt: %s\n", s.c_str());
     return NGX_CONF_OK;
   }
 
@@ -900,6 +906,8 @@ char* ps_merge_loc_conf(ngx_conf_t* cf, void* parent, void* child) {
   // options ("directory specific options") from cfg_l, and no options from
   // parent_cfg_l.  Rebase the directory specific options on the global options.
   ps_merge_options(cfg_s->server_context->config(), &cfg_l->options);
+  GoogleString s = cfg_l->options->OptionsToString();
+  fprintf(stderr, "merged loc opt with sc opt: %s\n", s.c_str());
 
   return NGX_CONF_OK;
 }
@@ -1370,14 +1378,14 @@ bool ps_determine_options(ngx_http_request_t* r,
                           bool html_rewrite) {
   ps_srv_conf_t* cfg_s = ps_get_srv_config(r);
   ps_loc_conf_t* cfg_l = ps_get_loc_config(r);
-
+  fprintf(stderr, "ps_det_opt: s[%p], l[%p]\n", cfg_s, cfg_l);
   // Global options for this server.  Never null.
   RewriteOptions* global_options = cfg_s->server_context->global_options();
 
   // Directory-specific options, usually null.  They've already been rebased off
   // of the global options as part of the configuration process.
   RewriteOptions* directory_options = cfg_l->options;
-
+  
   // Request-specific options, nearly always null.  If set they need to be
   // rebased on the directory options or the global options.
   RewriteOptions* request_options = ps_determine_request_options(
